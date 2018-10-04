@@ -1,0 +1,164 @@
+package com.fca.conceptgeneration
+import scala.collection.Map
+import scala.collection.Set
+
+import org.apache.spark.SparkContext
+import scala.tools.nsc.transform.Mixin
+
+object NeighborConceptGeneration {
+
+  case class Concept(extent: Set[String], intent: Set[String], isValidNeighbor: Boolean)
+  def main(args: Array[String]) {
+    println("Hello world")
+    implicit val sc = new SparkContext("local", "concept-generation")
+    val numberOfAttributes = 3
+    val context = sc.textFile("/Users/raghavendrakumar/workspace/ConceptAnalysis/context.txt").map {
+      line =>
+        val data = line.split(":")
+
+        (data(0), data(1))
+    }
+    val contextInverse = sc.textFile("/Users/raghavendrakumar/workspace/ConceptAnalysis/context.txt").map {
+      line =>
+        val data = line.split(":")
+        val attributes = data(1).split(",").map { f =>
+          val attribute = f
+
+          (attribute, data(0))
+        }.toList
+
+        (attributes)
+    }
+
+    val contextAsMap = context.collectAsMap()
+    val contextInverseAsMap = contextInverse.map { f =>
+      val contextInverseListMerge = f
+      (contextInverseListMerge)
+    }.reduce(_ union _).groupBy(_._1).map { case (k, v) => (k, v.map(_._2).toSet) }
+
+    val commonObjectsamongAttributes = context.filter { f => f._2.replace(",", "").length() == numberOfAttributes } //need to change this logic to number of values in a key==number of attributes
+    val leastFormalConcept = (if (commonObjectsamongAttributes.collect().length >= 1) commonObjectsamongAttributes else null).collectAsMap
+
+    val leastConceptAsConcept = leastFormalConcept.map { f =>
+      Concept(Set(f._1), Set(f._2), true)
+    }.head
+
+    val minSet = context.map { f =>
+      val objectsInContext = f._1
+      (objectsInContext)
+    }.collect().toSet.diff(leastConceptAsConcept.extent)
+
+    //getAllFormalConcepts(Set(leastConceptAsConcept),contextInverseAsMap, contextAsMap, minSet)
+
+    val output = getFormalConceptforEachObject(leastConceptAsConcept, contextInverseAsMap, contextAsMap, minSet, Set(leastConceptAsConcept))
+
+    val finalConcepts = output.asInstanceOf[Set[Concept]]
+    println("Final List of Concepts")
+    finalConcepts.foreach(println)
+
+    // sc.parallelize(Seq(output)).saveAsTextFile("/Users/raghavendrakumar/workspace/ConceptAnalysis/op")
+  }
+
+  def getFormalConceptforEachObject(concept: Concept, contextInverseAsMap: Map[String, Set[String]], contextAsMap: Map[String, String], minSet: Set[String], finalConcepts: Set[Concept])(implicit sc: SparkContext): Any = {
+
+    val validConcepts = if (concept.isValidNeighbor) {
+      println("entered with concept details" + concept.extent + concept.intent + concept.isValidNeighbor)
+      val differenceSet = contextAsMap.keySet.diff(concept.extent)
+      val validConcept = differenceSet.map { currentObject =>
+        val commonObjectAsSet = Set(currentObject)
+        val objectsRequiredforB1 = concept.extent.union(commonObjectAsSet)
+        val forEachObjectInB1 = objectsRequiredforB1.map {
+          p =>
+            val attributesForEachObjectAsString = contextAsMap.apply(p).split(",").toSet
+            (attributesForEachObjectAsString)
+        }
+
+        val forEachObjectinB1RDD = sc.parallelize(forEachObjectInB1.toSeq)
+        val B1 = forEachObjectinB1RDD.reduce { (a, b) => (a.intersect(b)) }
+        val listOfIntents = finalConcepts.map { concept =>
+          val intentOfConcept = concept.intent
+          (intentOfConcept)
+        }.flatten
+
+        val validNeighbors = if (!(B1.isEmpty)) {
+          val B1asRDD = sc.parallelize(B1.toSeq).map {
+            f =>
+              val rddElementasSet = Set(f)
+              (rddElementasSet)
+          }
+          //if lenght is one consider the value from contextInverseAsMap
+          val conceptsFound = if (B1.size == 1) {
+            val a = B1asRDD.map { f =>
+              val singleRDD = f.map { g =>
+                val data = g
+                (data)
+              }.mkString
+              (singleRDD)
+            }
+
+            (Concept(contextInverseAsMap.get(a.take(1).mkString).toSet.flatten, B1, true))
+          } else {
+            val conceptExtentEach = B1asRDD.reduce { (a, b) => contextInverseAsMap.apply(a.mkString).intersect(contextInverseAsMap.apply(b.mkString)) }
+            (Concept(conceptExtentEach, B1, true))
+          }
+
+          val differenceinComparisonSet = (conceptsFound.extent.diff(concept.extent)).diff(commonObjectAsSet)
+          val validNeighborConcept = if (minSet.intersect(differenceinComparisonSet).size == 0) {
+
+            finalConcepts.+(Concept(conceptsFound.extent, B1, true))
+
+            Concept(conceptsFound.extent, B1, true)
+
+          } else {
+            minSet.-(currentObject)
+            Concept(conceptsFound.extent, B1, false)
+
+          }
+      
+          (validNeighborConcept)
+        } else {
+          (Concept(Set(), Set(), false))
+        }  
+
+       
+        (validNeighbors)
+      }
+
+      (validConcept)
+
+    }
+
+    (validConcepts)
+
+  }
+
+}
+
+x1:1,2,3
+x2:1,3
+x3:2,3
+x4:1
+
+
+fish leech:needs water to live,lives in water,can move
+bream:needs water to live,lives in water,can move,has limbs
+frog:needs water to live,lives in water,lives on land,can move,has limbs
+dog:needs water to live,lives on land,can move,has limbs,breast feeds
+water weeds:needs water to live,lives in water,needs chloryphyll,monocotyledon
+reed:needs water to live,lives in water,lives on land,needs chloryphyll,monocotyledon
+bean:needs water to live,lives on land,needs chloryphyll,dicotyledon
+corn:needs water to live,lives on land,needs chloryphyll,monocotyledon
+
+
+1:odd,square
+2:even,prime
+3:odd,prime
+4:composite,even,square
+5:odd,prime
+6:composite,even
+7:odd,prime
+8:composite,even
+9:composite,odd,square
+10:composite,even
+
+
